@@ -1,4 +1,5 @@
-// CMS Part D MCP Server
+// CMS Part D MCP Server — prescriber-level drug data + spending via data.cms.gov
+// Code Mode only: partd_search, partd_execute, query_data, get_schema
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerQueryData } from "./tools/query-data";
@@ -8,19 +9,14 @@ import { PartdDataDO } from "./do";
 
 export { PartdDataDO };
 
-interface PartdEnv {
-    PARTD_DATA_DO: DurableObjectNamespace;
-    CODE_MODE_LOADER: WorkerLoader;
-}
-
-export class MyMCP extends McpAgent {
+export class MyMCP extends McpAgent<Env> {
     server = new McpServer({
         name: "partd",
         version: "0.1.0",
     });
 
     async init() {
-        const env = this.env as unknown as PartdEnv;
+        const env = this.env;
         registerQueryData(this.server, env);
         registerGetSchema(this.server, env);
         registerCodeMode(this.server, env);
