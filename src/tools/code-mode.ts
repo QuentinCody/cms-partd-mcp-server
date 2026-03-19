@@ -9,14 +9,9 @@ interface ToolRegistrar {
     tool: (...args: unknown[]) => void;
 }
 
-interface CodeModeEnv {
-    PARTD_DATA_DO: DurableObjectNamespace;
-    CODE_MODE_LOADER: WorkerLoader;
-}
-
 export function registerCodeMode(
     server: McpServer,
-    env: CodeModeEnv,
+    env: Pick<Env, "PARTD_DATA_DO" | "CODE_MODE_LOADER">,
 ) {
     const apiFetch = createPartdApiFetch();
 
