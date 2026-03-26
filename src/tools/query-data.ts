@@ -12,7 +12,7 @@ interface QueryEnv {
     PARTD_DATA_DO?: unknown;
 }
 
-export function registerQueryData(server: McpServer, env?: QueryEnv) {
+export function registerQueryData(server: McpServer, env?: QueryEnv): void {
     const handler = createQueryDataHandler("PARTD_DATA_DO", "partd");
 
     server.registerTool(

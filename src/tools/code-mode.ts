@@ -12,7 +12,7 @@ interface ToolRegistrar {
 export function registerCodeMode(
     server: McpServer,
     env: Pick<Env, "PARTD_DATA_DO" | "CODE_MODE_LOADER">,
-) {
+): void {
     const apiFetch = createPartdApiFetch();
 
     // McpServer implements tool() which satisfies ToolRegistrar at runtime
