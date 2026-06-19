@@ -7,8 +7,10 @@ import { partdFetch } from "./http";
  * Drug spending has separate annual and quarterly endpoints.
  */
 const DATASET_IDS: Record<string, string> = {
-    // Part D Prescriber — most recent years
-    "prescriber-2022": "34f63cd4-3f80-4a69-82f1-528e9e1e099e",
+    // Part D Prescriber by Provider and Drug — CMS reissues this dataset's UUID on each
+    // release; the prior 34f63cd4.../b09a7e03... were retired upstream and now 404.
+    // The default path (and unrecognized years) use prescriber-2022 → current dataset.
+    "prescriber-2022": "c6905d43-45de-470d-897c-9ed8e75e256d",
     "prescriber-2021": "b09a7e03-f2d3-4a5b-8297-472e23cd1a1c",
 
     // Part D Drug Spending

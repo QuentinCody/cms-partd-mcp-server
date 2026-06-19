@@ -26,6 +26,8 @@ export function registerCodeMode(
 
     const executeTool = createExecuteTool({
         prefix: "partd",
+        // Verifiable provenance: partd_execute results carry a _meta.citation.
+        source: { id: "partd", name: "CMS Medicare Part D", url: "https://data.cms.gov", license: "U.S. Public Domain" },
         catalog: partdCatalog,
         apiFetch,
         doNamespace: env.PARTD_DATA_DO,
