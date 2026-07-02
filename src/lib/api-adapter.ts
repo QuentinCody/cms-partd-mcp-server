@@ -5,14 +5,29 @@ import { partdFetch } from "./http";
  * Dataset IDs for CMS Part D data.
  * Prescriber data uses annual dataset IDs (one per year).
  * Drug spending has separate annual and quarterly endpoints.
+ *
+ * CMS retires/reissues these UUIDs across releases. Refresh the map from
+ * https://data.cms.gov/data.json → dataset "Medicare Part D Prescribers - by
+ * Provider and Drug" → distribution accessURLs (the entry whose description is
+ * "latest" is a rolling alias CMS repoints to each new annual release).
  */
-const DATASET_IDS: Record<string, string> = {
-    // Part D Prescriber by Provider and Drug — CMS reissues this dataset's UUID on each
-    // release; the prior 34f63cd4.../b09a7e03... were retired upstream and now 404.
-    // The default path (and unrecognized years) use prescriber-2022 → current dataset.
-    "prescriber-2022": "c6905d43-45de-470d-897c-9ed8e75e256d",
-    "prescriber-2021": "b09a7e03-f2d3-4a5b-8297-472e23cd1a1c",
+const PRESCRIBER_DATASETS: Record<string, string> = {
+    latest: "9552739e-3d05-4c1b-8eff-ecabf391e2e5",
+    "2024": "d5aa71a8-dcc0-4570-8bcf-bd39deac69fe",
+    "2023": "e54db557-cd82-4e91-a0fe-61aad5865d69",
+    "2022": "b101b457-ffa4-49bb-8fd9-27c1266086e2",
+    "2021": "f68114ed-f854-4ffc-9c6e-ed78b5e2f8d0",
+    "2020": "7795fe20-e80e-435a-a9ed-d2d65e05feeb",
+    "2019": "2a6705e6-7a1e-460c-ba22-35249a531918",
+    "2018": "802fe556-311f-4962-8d75-d5f4ff405884",
+    "2017": "05f108dd-76c4-49f4-9fdc-788d8f4251ec",
+    "2016": "25106f9d-0eb8-4ba7-b237-486ee87d910a",
+    "2015": "1d650894-8afe-4056-ba31-a85cb0e3cee6",
+    "2014": "0779bc8d-18dd-40b8-9d61-7addc8b0daf1",
+    "2013": "c6905d43-45de-470d-897c-9ed8e75e256d",
+};
 
+const DATASET_IDS: Record<string, string> = {
     // Part D Drug Spending
     "spending-annual": "7e0b4365-fd63-4a29-8f5e-e0ac9f66a81b",
     "spending-quarterly": "4ff7c618-4e40-483a-b390-c8a58c94fa15",
@@ -51,15 +66,24 @@ export function createPartdApiFetch(): ApiFetchFn {
         let datasetId: string | undefined;
         let apiPath: string;
 
-        // Route: /prescriber/search → prescriber dataset
+        // Route: /prescriber/search → prescriber dataset (annual releases)
         if (path.startsWith("/prescriber/")) {
-            // Default to most recent year; allow year param override
-            const year = request.params?.year ?? "2022";
+            const rawYear = request.params?.year;
             delete request.params?.year;
-            datasetId = DATASET_IDS[`prescriber-${year}`];
+            const year =
+                rawYear === undefined || rawYear === null || rawYear === ""
+                    ? "latest"
+                    : String(rawYear);
+            datasetId = PRESCRIBER_DATASETS[year];
             if (!datasetId) {
-                // Fallback to 2022 if unrecognized year
-                datasetId = DATASET_IDS["prescriber-2022"];
+                const years = Object.keys(PRESCRIBER_DATASETS).join(", ");
+                const error = new Error(
+                    `Unknown prescriber data year "${year}". Available: ${years}. ` +
+                        `"latest" (the default) tracks the newest CMS release, currently 2024.`,
+                ) as Error & { status: number; data: unknown };
+                error.status = 400;
+                error.data = { available_years: Object.keys(PRESCRIBER_DATASETS) };
+                throw error;
             }
             apiPath = `/data-api/v1/dataset/${datasetId}/data`;
         }
@@ -94,7 +118,12 @@ export function createPartdApiFetch(): ApiFetchFn {
             } catch {
                 errorBody = response.statusText;
             }
-            const error = new Error(`HTTP ${response.status}: ${errorBody.slice(0, 200)}`) as Error & {
+            // CMS retires dataset UUIDs on new releases — make that failure self-describing
+            const hint =
+                response.status === 404 && apiPath.includes("/data-api/v1/dataset/")
+                    ? " (CMS may have retired this dataset UUID on a new release — retry with year:'latest', or refresh the UUID map from https://data.cms.gov/data.json)"
+                    : "";
+            const error = new Error(`HTTP ${response.status}: ${errorBody.slice(0, 200)}${hint}`) as Error & {
                 status: number;
                 data: unknown;
             };
