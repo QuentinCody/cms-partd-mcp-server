@@ -122,4 +122,97 @@ describe("createVerifyCitationTool", () => {
 			(res.structuredContent?.data as { verified: boolean }).verified,
 		).toBe(true);
 	});
+
+	it("verifies query identity and emits a replay_hint (replay protocol)", async () => {
+		const code =
+			"return await api.get('/prescriber/search',{Prscrbr_NPI:'1558775700',year:'2022'})";
+		const query_hash = await sha256Hex(canonicalJson(code));
+
+		const tool = createVerifyCitationTool();
+		const { register, handlers } = captureRegistrations();
+		tool.register(register);
+		const handler = handlers.get("verify_citation") as unknown as (i: {
+			query_hash: string;
+			query: unknown;
+		}) => Promise<{
+			structuredContent?: { data?: unknown };
+			content: Array<{ text: string }>;
+		}>;
+
+		const res = await handler({ query_hash, query: code });
+		const out = res.structuredContent?.data as {
+			verified: boolean;
+			query_check?: { verified: boolean };
+			replay_hint?: string;
+		};
+		expect(out.verified).toBe(true);
+		expect(out.query_check?.verified).toBe(true);
+		expect(out.replay_hint).toMatch(/re-run this exact code/i);
+	});
+
+	it("flags a query that is NOT the cited one (fabricated-claim adjudication)", async () => {
+		const realCode = "return await api.get('/x',{a:1})";
+		const query_hash = await sha256Hex(canonicalJson(realCode));
+
+		const tool = createVerifyCitationTool();
+		const { register, handlers } = captureRegistrations();
+		tool.register(register);
+		const handler = handlers.get("verify_citation") as unknown as (i: {
+			query_hash: string;
+			query: unknown;
+		}) => Promise<{ structuredContent?: { data?: unknown } }>;
+
+		const res = await handler({
+			query_hash,
+			query: "return await api.get('/x',{a:2})",
+		});
+		const out = res.structuredContent?.data as {
+			verified: boolean;
+			query_check?: { verified: boolean };
+			replay_hint?: string;
+		};
+		expect(out.verified).toBe(false);
+		expect(out.query_check?.verified).toBe(false);
+		expect(out.replay_hint).toBeUndefined();
+	});
+
+	it("verifies result integrity AND query identity together (both pairs)", async () => {
+		const data = { rows: 3 };
+		const expected_hash = await sha256Hex(canonicalJson(data));
+		const code = "return 3";
+		const query_hash = await sha256Hex(canonicalJson(code));
+
+		const tool = createVerifyCitationTool();
+		const { register, handlers } = captureRegistrations();
+		tool.register(register);
+		const handler = handlers.get("verify_citation") as unknown as (i: {
+			expected_hash: string;
+			data: unknown;
+			query_hash: string;
+			query: unknown;
+		}) => Promise<{ structuredContent?: { data?: unknown } }>;
+
+		const res = await handler({ expected_hash, data, query_hash, query: code });
+		const out = res.structuredContent?.data as {
+			verified: boolean;
+			expected_hash?: string;
+			query_check?: { verified: boolean };
+			replay_hint?: string;
+		};
+		expect(out.verified).toBe(true);
+		// back-compat: result-integrity hashes stay flat at top level
+		expect(out.expected_hash).toBe(expected_hash);
+		expect(out.query_check?.verified).toBe(true);
+		// no replay hint when the result was already verified this call
+		expect(out.replay_hint).toBeUndefined();
+	});
+
+	it("errors when neither verification pair is supplied", async () => {
+		const tool = createVerifyCitationTool();
+		const { register, handlers } = captureRegistrations();
+		tool.register(register);
+		const handler = handlers.get("verify_citation")!;
+		const res = await handler({} as { expected_hash: string; data: unknown });
+		expect(res.isError).toBe(true);
+	});
 });

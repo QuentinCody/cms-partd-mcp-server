@@ -1,4 +1,8 @@
 import type { ApiFetchFn } from "@bio-mcp/shared/codemode/catalog";
+import {
+    EmptyDatasetError,
+    guardEmptyResult,
+} from "@bio-mcp/shared/codemode/empty-result-guard";
 import { partdFetch } from "./http";
 
 /**
@@ -60,42 +64,135 @@ function buildCmsParams(
     return out;
 }
 
+/** True when the CMS params carry at least one column filter (not just paging). */
+function hasCmsFilters(cmsParams: Record<string, unknown>): boolean {
+    return Object.keys(cmsParams).some((k) => k.startsWith("filter["));
+}
+
+/** True when a CMS data-API payload is an empty row set (bare array or {data|results:[]}). */
+function isEmptyRows(data: unknown): boolean {
+    if (Array.isArray(data)) return data.length === 0;
+    if (data && typeof data === "object") {
+        const d = data as Record<string, unknown>;
+        if (Array.isArray(d.data)) return d.data.length === 0;
+        if (Array.isArray(d.results)) return d.results.length === 0;
+    }
+    return false;
+}
+
+/** Issue one CMS request and parse it into `{ status, data }` (throws on !ok). */
+async function fetchParsed(
+    apiPath: string,
+    cmsParams: Record<string, unknown>,
+    opts?: { timeout?: number; retries?: number },
+): Promise<{ status: number; data: unknown }> {
+    const response = await partdFetch(apiPath, cmsParams, opts);
+
+    if (!response.ok) {
+        let errorBody: string;
+        try {
+            errorBody = await response.text();
+        } catch {
+            errorBody = response.statusText;
+        }
+        // CMS retires dataset UUIDs on new releases — make that failure self-describing
+        const hint =
+            response.status === 404 && apiPath.includes("/data-api/v1/dataset/")
+                ? " (CMS may have retired this dataset UUID on a new release — retry with year:'latest', or refresh the UUID map from https://data.cms.gov/data.json)"
+                : "";
+        const error = new Error(
+            `HTTP ${response.status}: ${errorBody.slice(0, 200)}${hint}`,
+        ) as Error & {
+            status: number;
+            data: unknown;
+        };
+        error.status = response.status;
+        error.data = errorBody;
+        throw error;
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("json")) {
+        const text = await response.text();
+        return { status: response.status, data: text };
+    }
+
+    const data = await response.json();
+    return { status: response.status, data };
+}
+
+/**
+ * Verify a filtered CMS query that came back empty before trusting it as absence.
+ * See {@link guardEmptyResult}: probes the dataset unfiltered (probe-only, no
+ * retry) and certifies stable empties, throws when the dataset itself looks
+ * empty/unreachable, and degrades gracefully if the probe can't complete. On a
+ * certified empty the payload is wrapped as `{ __guard, data }` so the
+ * annotation reaches the citation layer.
+ */
+async function verifyEmpty(
+    first: { status: number; data: unknown },
+    apiPath: string,
+    describe: string,
+): Promise<{ status: number; data: unknown }> {
+    // Probe-only (no retry): a tight, retry-free unfiltered probe so the guard
+    // can never itself blow the isolate execution budget on a slow upstream.
+    const outcome = await guardEmptyResult(first.data, {
+        isEmpty: isEmptyRows,
+        probe: async () =>
+            (await fetchParsed(apiPath, { size: 1 }, { timeout: 6000, retries: 0 }))
+                .data,
+        describe,
+        log: (m) => console.warn(`[empty-guard] ${m}`),
+    });
+    if (outcome.guard) {
+        return {
+            status: first.status,
+            data: { __guard: outcome.guard, data: outcome.data },
+        };
+    }
+    return { status: first.status, data: outcome.data };
+}
+
+function resolvePrescriberPath(request: {
+    params?: Record<string, unknown>;
+}): string {
+    const rawYear = request.params?.year;
+    delete request.params?.year;
+    const year =
+        rawYear === undefined || rawYear === null || rawYear === ""
+            ? "latest"
+            : String(rawYear);
+    const datasetId = PRESCRIBER_DATASETS[year];
+    if (!datasetId) {
+        const years = Object.keys(PRESCRIBER_DATASETS).join(", ");
+        const error = new Error(
+            `Unknown prescriber data year "${year}". Available: ${years}. ` +
+                `"latest" (the default) tracks the newest CMS release, currently 2024.`,
+        ) as Error & { status: number; data: unknown };
+        error.status = 400;
+        error.data = { available_years: Object.keys(PRESCRIBER_DATASETS) };
+        throw error;
+    }
+    return `/data-api/v1/dataset/${datasetId}/data`;
+}
+
 export function createPartdApiFetch(): ApiFetchFn {
     return async (request) => {
         const path = request.path;
-        let datasetId: string | undefined;
+        const isPrescriber = path.startsWith("/prescriber/");
         let apiPath: string;
 
         // Route: /prescriber/search → prescriber dataset (annual releases)
-        if (path.startsWith("/prescriber/")) {
-            const rawYear = request.params?.year;
-            delete request.params?.year;
-            const year =
-                rawYear === undefined || rawYear === null || rawYear === ""
-                    ? "latest"
-                    : String(rawYear);
-            datasetId = PRESCRIBER_DATASETS[year];
-            if (!datasetId) {
-                const years = Object.keys(PRESCRIBER_DATASETS).join(", ");
-                const error = new Error(
-                    `Unknown prescriber data year "${year}". Available: ${years}. ` +
-                        `"latest" (the default) tracks the newest CMS release, currently 2024.`,
-                ) as Error & { status: number; data: unknown };
-                error.status = 400;
-                error.data = { available_years: Object.keys(PRESCRIBER_DATASETS) };
-                throw error;
-            }
-            apiPath = `/data-api/v1/dataset/${datasetId}/data`;
+        if (isPrescriber) {
+            apiPath = resolvePrescriberPath(request);
         }
         // Route: /spending/annual → annual spending dataset
         else if (path === "/spending/annual" || path.startsWith("/spending/annual?")) {
-            datasetId = DATASET_IDS["spending-annual"];
-            apiPath = `/data-api/v1/dataset/${datasetId}/data`;
+            apiPath = `/data-api/v1/dataset/${DATASET_IDS["spending-annual"]}/data`;
         }
         // Route: /spending/quarterly → quarterly spending dataset
         else if (path === "/spending/quarterly" || path.startsWith("/spending/quarterly?")) {
-            datasetId = DATASET_IDS["spending-quarterly"];
-            apiPath = `/data-api/v1/dataset/${datasetId}/data`;
+            apiPath = `/data-api/v1/dataset/${DATASET_IDS["spending-quarterly"]}/data`;
         }
         // Fallback: pass path through directly
         else {
@@ -109,36 +206,18 @@ export function createPartdApiFetch(): ApiFetchFn {
             cmsParams.size = 100;
         }
 
-        const response = await partdFetch(apiPath, cmsParams);
+        const result = await fetchParsed(apiPath, cmsParams);
 
-        if (!response.ok) {
-            let errorBody: string;
-            try {
-                errorBody = await response.text();
-            } catch {
-                errorBody = response.statusText;
-            }
-            // CMS retires dataset UUIDs on new releases — make that failure self-describing
-            const hint =
-                response.status === 404 && apiPath.includes("/data-api/v1/dataset/")
-                    ? " (CMS may have retired this dataset UUID on a new release — retry with year:'latest', or refresh the UUID map from https://data.cms.gov/data.json)"
-                    : "";
-            const error = new Error(`HTTP ${response.status}: ${errorBody.slice(0, 200)}${hint}`) as Error & {
-                status: number;
-                data: unknown;
-            };
-            error.status = response.status;
-            error.data = errorBody;
-            throw error;
+        // Guard against silent transient empties on FILTERED prescriber lookups —
+        // the failure mode where a real NPI-year returns 0 rows during CDN blips
+        // or dataset-UUID churn, misreading as "no data exists". Unfiltered or
+        // non-prescriber queries with legitimately-empty results are left alone.
+        if (isPrescriber && hasCmsFilters(cmsParams) && isEmptyRows(result.data)) {
+            return await verifyEmpty(result, apiPath, `CMS ${path} (${apiPath})`);
         }
 
-        const contentType = response.headers.get("content-type") || "";
-        if (!contentType.includes("json")) {
-            const text = await response.text();
-            return { status: response.status, data: text };
-        }
-
-        const data = await response.json();
-        return { status: response.status, data };
+        return result;
     };
 }
+
+export { EmptyDatasetError };
