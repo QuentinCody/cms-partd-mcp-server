@@ -1,3 +1,4 @@
+import { partdResponse } from "../lib/tool-result";
 import type { McpServer } from "@bio-mcp/shared/mcp";
 import { z } from "zod";
 import { createQueryDataHandler } from "@bio-mcp/shared/staging/utils";
@@ -15,8 +16,8 @@ interface QueryEnv {
 export function registerQueryData(server: McpServer, env?: QueryEnv): void {
     const handler = createQueryDataHandler("PARTD_DATA_DO", "partd");
 
-    server.registerTool(
-        "partd_query_data",
+    for (const name of ["partd_query_data", "mcp_partd_query_data"]) server.registerTool(
+        name,
         {
             title: "Query Staged Part D Data",
             description:
@@ -24,7 +25,7 @@ export function registerQueryData(server: McpServer, env?: QueryEnv): void {
             inputSchema: {
                 data_access_id: z.string().min(1).describe("Data access ID for the staged dataset"),
                 sql: z.string().min(1).describe("SQL query to execute against the staged data"),
-                limit: z.number().int().positive().max(10000).default(100).optional().describe("Maximum number of rows to return (default: 100)"),
+                limit: z.number().int().positive().max(10000).optional().describe("Maximum number of rows to return (default: 100)"),
             },
         },
         async (args: QueryDataArgs, extra) => {
@@ -35,7 +36,7 @@ export function registerQueryData(server: McpServer, env?: QueryEnv): void {
                 limit: args.limit,
             };
             const handlerEnv: Record<string, unknown> = { ...runtimeEnv };
-            return handler(handlerArgs, handlerEnv);
+            return partdResponse(() => handler(handlerArgs, handlerEnv), runtimeEnv, name, extra, args);
         },
     );
 }

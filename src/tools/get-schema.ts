@@ -1,3 +1,4 @@
+import { partdResponse } from "../lib/tool-result";
 import type { McpServer } from "@bio-mcp/shared/mcp";
 import { z } from "zod";
 import { createGetSchemaHandler } from "@bio-mcp/shared/staging/utils";
@@ -13,8 +14,8 @@ interface SchemaEnv {
 export function registerGetSchema(server: McpServer, env?: SchemaEnv): void {
     const handler = createGetSchemaHandler("PARTD_DATA_DO", "partd");
 
-    server.registerTool(
-        "partd_get_schema",
+    for (const name of ["partd_get_schema", "mcp_partd_get_schema"]) server.registerTool(
+        name,
         {
             title: "Get Staged Data Schema",
             description:
@@ -32,11 +33,11 @@ export function registerGetSchema(server: McpServer, env?: SchemaEnv): void {
                 data_access_id: args.data_access_id,
             };
             const handlerEnv: Record<string, unknown> = { ...runtimeEnv };
-            return handler(
+            return partdResponse(() => handler(
                 handlerArgs,
                 handlerEnv,
                 (extra as Record<string, unknown>),
-            );
+            ), runtimeEnv, name, extra, args);
         },
     );
 }

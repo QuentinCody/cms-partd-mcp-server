@@ -3,7 +3,9 @@ import {
     EmptyDatasetError,
     guardEmptyResult,
 } from "@bio-mcp/shared/codemode/empty-result-guard";
-import { partdFetch } from "./http";
+import { releaseDiscovery, releasePage } from "./release-page";
+import { fail } from "./release-http";
+import { readDataPage } from "./filters";
 
 /**
  * Dataset IDs for CMS Part D data.
@@ -52,7 +54,7 @@ function buildCmsParams(
         if (value === undefined || value === null) continue;
 
         // Pass through pagination / keyword params directly
-        if (key === "size" || key === "offset" || key === "keyword") {
+        if (key === "size" || key === "offset" || key === "keyword" || key === "sort" || key.startsWith("filter[")) {
             out[key] = value;
             continue;
         }
@@ -80,45 +82,13 @@ function isEmptyRows(data: unknown): boolean {
     return false;
 }
 
-/** Issue one CMS request and parse it into `{ status, data }` (throws on !ok). */
+/** Bound the complete native response, including error evidence. */
 async function fetchParsed(
     apiPath: string,
     cmsParams: Record<string, unknown>,
-    opts?: { timeout?: number; retries?: number },
+    timeout = 30000,
 ): Promise<{ status: number; data: unknown }> {
-    const response = await partdFetch(apiPath, cmsParams, opts);
-
-    if (!response.ok) {
-        let errorBody: string;
-        try {
-            errorBody = await response.text();
-        } catch {
-            errorBody = response.statusText;
-        }
-        // CMS retires dataset UUIDs on new releases — make that failure self-describing
-        const hint =
-            response.status === 404 && apiPath.includes("/data-api/v1/dataset/")
-                ? " (CMS may have retired this dataset UUID on a new release — retry with year:'latest', or refresh the UUID map from https://data.cms.gov/data.json)"
-                : "";
-        const error = new Error(
-            `HTTP ${response.status}: ${errorBody.slice(0, 200)}${hint}`,
-        ) as Error & {
-            status: number;
-            data: unknown;
-        };
-        error.status = response.status;
-        error.data = errorBody;
-        throw error;
-    }
-
-    const contentType = response.headers.get("content-type") || "";
-    if (!contentType.includes("json")) {
-        const text = await response.text();
-        return { status: response.status, data: text };
-    }
-
-    const data = await response.json();
-    return { status: response.status, data };
+    return readDataPage(apiPath, cmsParams, Date.now() + timeout);
 }
 
 /**
@@ -139,7 +109,7 @@ async function verifyEmpty(
     const outcome = await guardEmptyResult(first.data, {
         isEmpty: isEmptyRows,
         probe: async () =>
-            (await fetchParsed(apiPath, { size: 1 }, { timeout: 6000, retries: 0 }))
+            (await fetchParsed(apiPath, { size: 1 }, 6000))
                 .data,
         describe,
         log: (m) => console.warn(`[empty-guard] ${m}`),
@@ -162,7 +132,7 @@ function resolvePrescriberPath(request: {
         rawYear === undefined || rawYear === null || rawYear === ""
             ? "latest"
             : String(rawYear);
-    const datasetId = PRESCRIBER_DATASETS[year];
+    const datasetId = Object.prototype.hasOwnProperty.call(PRESCRIBER_DATASETS, year) ? PRESCRIBER_DATASETS[year] : undefined;
     if (!datasetId) {
         const years = Object.keys(PRESCRIBER_DATASETS).join(", ");
         const error = new Error(
@@ -178,13 +148,18 @@ function resolvePrescriberPath(request: {
 
 export function createPartdApiFetch(): ApiFetchFn {
     return async (request) => {
+        if (request.method !== "GET" || request.body !== undefined) fail("CMS Part D supports bodyless GET requests only", 405);
+        if (request.path === "/datasets/discover") return releaseDiscovery(request.params ?? {});
+        if (request.path === "/datasets/page") return releasePage(request.params ?? {});
+        // Preserve the caller's selection when the legacy resolver removes year.
+        const legacyRequest = { ...request, params: { ...request.params } };
         const path = request.path;
         const isPrescriber = path.startsWith("/prescriber/");
         let apiPath: string;
 
         // Route: /prescriber/search → prescriber dataset (annual releases)
         if (isPrescriber) {
-            apiPath = resolvePrescriberPath(request);
+            apiPath = resolvePrescriberPath(legacyRequest);
         }
         // Route: /spending/annual → annual spending dataset
         else if (path === "/spending/annual" || path.startsWith("/spending/annual?")) {
@@ -199,10 +174,10 @@ export function createPartdApiFetch(): ApiFetchFn {
             apiPath = path;
         }
 
-        const cmsParams = buildCmsParams(request.params);
+        const cmsParams = buildCmsParams(legacyRequest.params);
 
         // Default page size if not specified
-        if (!cmsParams.size) {
+        if (cmsParams.size === undefined) {
             cmsParams.size = 100;
         }
 
